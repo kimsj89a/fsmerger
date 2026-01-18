@@ -1,128 +1,200 @@
-# logic.py
+import streamlit as st
 import pandas as pd
-from google import genai
-import json
-import openpyxl
 import io
-import pypdf
-import docx
+import re
+import logic 
+from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.utils import get_column_letter
 
-def extract_file_content(file):
-    """
-    파일 내용을 텍스트로 변환 (기존과 동일)
-    """
-    file_ext = file.name.split('.')[-1].lower()
-    content_list = []
+st.set_page_config(page_title="Financial Report AI", layout="wide")
+
+# --- CSS ---
+st.markdown("""
+    <style>
+        .file-list-box {
+            border: 1px solid #e6e6e6; padding: 10px; border-radius: 5px;
+            max-height: 200px; overflow-y: auto; background-color: #f9f9f9; margin-bottom: 20px;
+        }
+        .file-item {
+            font-size: 0.9em; margin-bottom: 4px; padding: 4px; background: white; border-radius: 3px;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- 컬럼 정렬 함수 ---
+def sort_columns_chronologically(columns):
+    fixed_cols = ['Account_Name']
+    date_cols = [c for c in columns if c not in ['Statement', 'Level', 'Account_Name']]
     
-    try:
-        if file_ext in ['xlsx', 'xls']:
-            engine = 'openpyxl' if file_ext == 'xlsx' else 'xlrd'
-            # header=None으로 읽어서 모든 텍스트를 다 가져옴
-            dfs = pd.read_excel(file, sheet_name=None, engine=engine, header=None)
-            for sheet_name, df in dfs.items():
-                # 빈 행/열 제거
-                df = df.dropna(how='all').dropna(axis=1, how='all')
-                csv_text = df.to_csv(index=False, header=False)
-                content_list.append(f"File: {file.name} | Sheet: {sheet_name}\n{csv_text}")
+    def date_sort_key(col_name):
+        s_name = str(col_name)
+        # 1. 연도
+        year_match = re.search(r'(\d{4})', s_name)
+        year = int(year_match.group(1)) if year_match else 9999
+        # 2. 분기/월
+        sub_val = 0
+        if '1Q' in s_name: sub_val = 1
+        elif '2Q' in s_name: sub_val = 4
+        elif '3Q' in s_name: sub_val = 7
+        elif '4Q' in s_name: sub_val = 10
+        # 3. 누적 우선순위 (누적이 뒤로)
+        is_cum = 1 if '누적' in s_name or 'Cum' in s_name or 'Year' in s_name else 0
+        return (year, sub_val, is_cum, s_name)
+    
+    sorted_date_cols = sorted(date_cols, key=date_sort_key)
+    return fixed_cols + sorted_date_cols
 
-        elif file_ext == 'csv':
-            df = pd.read_csv(file, header=None)
-            content_list.append(f"File: {file.name}\n{df.to_csv(index=False, header=False)}")
+# --- 사이드바 ---
+if 'api_key' not in st.session_state:
+    st.session_state.api_key = ''
 
-        elif file_ext == 'pdf':
-            pdf_reader = pypdf.PdfReader(file)
-            text = ""
-            for page in pdf_reader.pages:
-                text += page.extract_text() + "\n"
-            content_list.append(f"File: {file.name} (PDF)\n{text}")
+with st.sidebar:
+    is_expanded = not bool(st.session_state.api_key)
+    with st.expander("🔑 API Key 설정", expanded=is_expanded):
+        api_input = st.text_input("Gemini API Key", type="password", value=st.session_state.api_key, label_visibility="collapsed")
+        if api_input: st.session_state.api_key = api_input
+    
+    st.divider()
+    st.markdown("### 📐 단위 설정")
+    unit_option = st.selectbox("출력 단위를 선택하세요", ("원", "천원", "백만원", "억원"), index=0)
+    
+    unit_divisors = {"원": 1, "천원": 1000, "백만원": 1000000, "억원": 100000000}
+    divisor = unit_divisors[unit_option]
 
-        elif file_ext in ['docx', 'doc']:
-            doc = docx.Document(file)
-            text = "\n".join([para.text for para in doc.paragraphs])
-            content_list.append(f"File: {file.name} (Word)\n{text}")
+st.title("📑 통합 재무제표 보고서 (비교표시 포함)")
+
+# --- 스타일 함수 ---
+def style_dataframe(row):
+    level = row.get('Level', 3)
+    if level == 1: return ['background-color: #1f77b4; color: white; font-weight: bold;'] * len(row)
+    elif level == 2: return ['background-color: #aec7e8; color: black; font-weight: bold;'] * len(row)
+    return ['color: black;'] * len(row)
+
+# --- 엑셀 저장 ---
+def save_styled_excel(df, sheet_name_map, unit_text):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        if 'Statement' in df.columns: statements = df['Statement'].unique()
+        else: statements = ['Result']
             
-        elif file_ext == 'txt':
-            text = file.getvalue().decode("utf-8")
-            content_list.append(f"File: {file.name}\n{text}")
+        for stmt in statements:
+            if 'Statement' in df.columns: sub_df = df[df['Statement'] == stmt].copy()
+            else: sub_df = df.copy()
+            
+            all_cols = sub_df.columns.tolist()
+            sorted_cols = sort_columns_chronologically(all_cols)
+            final_cols = [c for c in sorted_cols if c in sub_df.columns]
+            
+            sheet_title = sheet_name_map.get(stmt, stmt)[:30]
+            sub_df[final_cols].to_excel(writer, sheet_name=sheet_title, index=False, startrow=1)
+            
+            ws = writer.sheets[sheet_title]
+            ws['A1'] = f"(단위: {unit_text})"
+            ws['A1'].font = Font(bold=True, italic=True)
+            
+            fill_lv1 = PatternFill(start_color="1F77B4", end_color="1F77B4", fill_type="solid")
+            font_lv1 = Font(color="FFFFFF", bold=True)
+            fill_lv2 = PatternFill(start_color="AEC7E8", end_color="AEC7E8", fill_type="solid")
+            font_lv2 = Font(color="000000", bold=True)
+            
+            numeric_col_indices = [i+1 for i, c in enumerate(final_cols) if c != 'Account_Name']
+            
+            sub_df = sub_df.reset_index(drop=True)
+            for idx, row in sub_df.iterrows():
+                excel_row = idx + 3
+                level = row.get('Level', 3)
+                for col_idx in range(1, len(final_cols) + 1):
+                    cell = ws.cell(row=excel_row, column=col_idx)
+                    if level == 1:
+                        cell.fill = fill_lv1
+                        cell.font = font_lv1
+                    elif level == 2:
+                        cell.fill = fill_lv2
+                        cell.font = font_lv2
+                    if col_idx - 1 in numeric_col_indices:
+                        cell.number_format = '#,##0'
+            ws.column_dimensions['A'].width = 30
+    return buffer
 
-    except Exception as e:
-        return f"Error reading {file.name}: {str(e)}"
+# --- 메인 로직 ---
+uploaded_files = st.file_uploader("파일 업로드 (Excel, PDF 등)", accept_multiple_files=True, type=['xlsx', 'xls', 'csv', 'pdf', 'docx', 'txt'])
 
-    return "\n\n".join(content_list)
+if uploaded_files:
+    st.markdown(f"##### 📂 업로드된 파일 목록 ({len(uploaded_files)}개)")
+    file_list_html = '<div class="file-list-box">'
+    for f in uploaded_files:
+        size_kb = f.size / 1024
+        file_list_html += f'<div class="file-item">📄 {f.name} ({size_kb:.1f} KB)</div>'
+    file_list_html += '</div>'
+    st.markdown(file_list_html, unsafe_allow_html=True)
 
-def process_smart_merge(api_key, target_files):
-    # 1. 컨텍스트 생성
-    full_context = ""
-    for file in target_files:
-        full_context += extract_file_content(file) + "\n\n"
+if uploaded_files and st.session_state.api_key:
+    if st.button("보고서 생성 시작", type="primary"):
+        status = st.status("AI가 비교 기간(전기) 데이터까지 추출 중입니다...", expanded=True)
+        try:
+            raw_df = logic.process_smart_merge(st.session_state.api_key, uploaded_files)
+            for col in raw_df.columns:
+                if col not in ['Statement', 'Level', 'Account_Name']:
+                    raw_df[col] = pd.to_numeric(raw_df[col], errors='coerce').fillna(0)
+            
+            # [추가] 값이 없는 빈 컬럼(0으로만 채워진 컬럼) 삭제
+            # Statement, Level, Account_Name은 제외하고 검사
+            numeric_cols = [c for c in raw_df.columns if c not in ['Statement', 'Level', 'Account_Name']]
+            # 합계가 0인 컬럼 찾기 (절대값 합계)
+            zero_cols = [c for c in numeric_cols if raw_df[c].abs().sum() == 0]
+            # 삭제
+            if zero_cols:
+                raw_df = raw_df.drop(columns=zero_cols)
+            
+            st.session_state['raw_data'] = raw_df
+            status.update(label="✅ 생성 완료!", state="complete", expanded=False)
+        except Exception as e:
+            status.update(label="❌ 오류 발생", state="error")
+            st.error(f"에러 내용: {e}")
+
+if 'raw_data' in st.session_state:
+    st.divider()
+    st.subheader(f"📊 분석 결과 (단위: {unit_option})")
     
-    # 컨텍스트 길이 제한 (약 30만자까지 늘림 - Flash 모델은 처리 가능)
-    if len(full_context) > 300000:
-        full_context = full_context[:300000] + "\n...(Truncated)"
-
-    client = genai.Client(api_key=api_key)
-
-    # [핵심 수정] 프롬프트: 완전 보존(Union) 지시
-    prompt = f"""
-    You are a Forensic Accountant. Your job is to create a consolidated spreadsheet that includes **EVERY SINGLE ACCOUNT ITEM** from the source files.
-
-    [MISSION: ZERO OMISSION]
-    1. **List ALL unique account names.** If File A has "Account X" and File B does not, you MUST list "Account X" and put 0 for File B.
-    2. **Do NOT Summarize.** Do not merge "Travel Expense" and "Transportation Expense" unless they are exactly the same string. Keep them as separate rows.
-    3. **Preserve Granularity.** If the source has detail rows, keep them. Do not just show the Totals.
-
-    [Logic 1: Columns (Time Periods)]
-    - Detect ALL time headers (Years, Quarters, Months).
-    - Handle Split Headers: "2025.3Q (3M)" and "2025.3Q (Cum)" must be separate columns.
-
-    [Logic 2: Structure]
-    - **Statement:** BS, IS, COGM, CF, Other
-    - **Level:** 1 (Total), 2 (Subtotal), 3 (Detail)
-    - **Account_Name:** The exact name from the source file.
-
-    [Logic 3: Order]
-    - Maintain standard accounting order (Assets -> Liabilities -> Equity -> Revenue -> Expense).
-    - Do NOT sort alphabetically.
-
-    [Input Data]
-    {full_context}
-
-    [Output Format]
-    JSON Array Only.
-    [
-      {{
-        "Statement": "IS",
-        "Level": 3,
-        "Account_Name": "복리후생비",
-        "2023": 1000,
-        "2024": 1200,
-        "2025.3Q(3M)": 300,
-        "2025.3Q(Cum)": 900
-      }},
-      ...
-    ]
-    """
-
-    try:
-        response = client.models.generate_content(
-            model="gemini-3-flash-preview", 
-            contents=prompt
-        )
-    except Exception:
-        # 모델 폴백
-        response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=prompt
-        )
-
-    # 파싱 로직
-    cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
-    if "[" in cleaned_text and "]" in cleaned_text:
-        s = cleaned_text.find("[")
-        e = cleaned_text.rfind("]") + 1
-        cleaned_text = cleaned_text[s:e]
+    display_df = st.session_state['raw_data'].copy()
     
-    data_list = json.loads(cleaned_text)
-    df = pd.DataFrame(data_list)
+    # 빈 행 제거 (값이 0이 아닌 행만 유지)
+    numeric_cols = [c for c in display_df.columns if c not in ['Statement', 'Level', 'Account_Name']]
+    display_df = display_df[display_df[numeric_cols].abs().sum(axis=1) != 0]
     
-    return df
+    # 단위 변환
+    for col in numeric_cols:
+        if divisor > 1:
+            display_df[col] = display_df[col] / divisor
+
+    available_types = display_df['Statement'].unique() if 'Statement' in display_df.columns else []
+    type_map = {'BS': '재무상태표', 'IS': '손익계산서', 'COGM': '제조원가명세서', 'CF': '현금흐름표', 'Other': '기타'}
+    
+    if len(available_types) > 0:
+        tabs = st.tabs([type_map.get(t, t) for t in available_types])
+
+        for i, stmt_type in enumerate(available_types):
+            with tabs[i]:
+                sub_df = display_df[display_df['Statement'] == stmt_type].copy()
+                
+                all_cols = sub_df.columns.tolist()
+                sorted_cols = sort_columns_chronologically(all_cols)
+                final_cols = [c for c in sorted_cols if c in sub_df.columns]
+
+                format_dict = {col: "{:,.0f}" for col in numeric_cols if col in final_cols}
+                
+                st.dataframe(
+                    sub_df[final_cols].style
+                    .apply(style_dataframe, axis=1)
+                    .format(format_dict),
+                    use_container_width=True,
+                    height=600
+                )
+    
+    excel_buffer = save_styled_excel(display_df, type_map, unit_option)
+    st.download_button(
+        f"📥 엑셀 다운로드 (단위: {unit_option})",
+        data=excel_buffer.getvalue(),
+        file_name=f"Financial_Report_Comparative_{unit_option}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
