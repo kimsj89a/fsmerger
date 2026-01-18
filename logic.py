@@ -58,29 +58,25 @@ def process_smart_merge(api_key, target_files):
 
     client = genai.Client(api_key=api_key)
 
-    # [프롬프트] 전기(Previous Period) 데이터 보존 및 누락 방지 강화
+    # [프롬프트] 로직 간소화: 연말 vs 분기 구분 명확화
     prompt = f"""
-    You are a Forensic Accountant creating a consolidated financial report.
-    
-    [MISSION]
-    Extract **EVERY** financial figure from the provided files without omission.
+    You are a Financial Analyst creating a consolidated report.
+    Simplify the merging logic based on two report types.
 
-    [CRITICAL RULE 1: Capture Comparative Data]
-    - Quarterly reports usually compare "Current Period" (Dang-gi) vs "Previous Period" (Jeon-gi).
-    - **You MUST extract BOTH.**
-    - If "Current" is 2025.3Q, infer that "Previous" is 2024.3Q.
-    - Explicitly label them: e.g., "2025.3Q(3M)", "2025.3Q(Cum)", "2024.3Q(3M)", "2024.3Q(Cum)".
-    - Do not drop "Previous" columns even if they seem redundant. Users need them for comparison.
+    [RULE 1: Annual Reports (Year-End)]
+    - If the data is for a full year (e.g., 2023, 2024), create simple year columns.
+    - **Format:** "2023", "2024"
+    - Do NOT split into "3M" or "Cumulative" for annual reports (it's always 12M/Cumulative).
 
-    [CRITICAL RULE 2: No Row Summarization]
-    - List ALL unique account names.
-    - If names differ slightly but mean the same (e.g., "Sales" vs "Revenue"), YOU MAY MERGE THEM.
-    - BUT if the account is unique (e.g. "Export Sales"), keep it separate.
+    [RULE 2: Interim Reports (Quarterly/Semi-Annual)]
+    - If the data is for a quarter (e.g., 2025.1Q, 2025.3Q), you MUST capture BOTH "3 Months" and "Cumulative".
+    - **Format:** "2025.3Q(3M)", "2025.3Q(Cum)"
+    - Note: Balance Sheet (BS) usually only has "Period End" (treat as Cum). Income Statement (IS) has both.
 
-    [Logic: Structure]
-    - **Statement:** BS, IS, COGM, CF, Other
-    - **Level:** 1(Total), 2(Subtotal), 3(Detail)
-    - **Account_Name:** Clean name.
+    [RULE 3: Data Integrity]
+    - **List ALL unique accounts.** Do not group "Sales" and "Other Sales" unless they are clearly identical.
+    - **Values:** Extract exact figures. If empty, use 0.
+    - **Order:** Assets -> Liabilities -> Equity -> Revenue -> Expense.
 
     [Input Data]
     {full_context}
@@ -92,10 +88,10 @@ def process_smart_merge(api_key, target_files):
         "Statement": "IS",
         "Level": 3,
         "Account_Name": "매출액",
-        "2024.3Q(3M)": 5000,
-        "2024.3Q(Cum)": 15000,
-        "2025.3Q(3M)": 5500,
-        "2025.3Q(Cum)": 16000
+        "2023": 10000,           // Annual
+        "2024": 12000,           // Annual
+        "2025.3Q(3M)": 3500,     // Interim (3 Months)
+        "2025.3Q(Cum)": 10500    // Interim (Cumulative)
       }},
       ...
     ]
