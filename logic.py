@@ -19,7 +19,6 @@ def extract_file_content(file):
             # header=None으로 읽어서 모든 데이터를 있는 그대로 가져옴
             dfs = pd.read_excel(file, sheet_name=None, engine=engine, header=None)
             for sheet_name, df in dfs.items():
-                # 데이터가 없는 빈 행/열만 제거하고 전송
                 df = df.dropna(how='all').dropna(axis=1, how='all')
                 csv_text = df.to_csv(index=False, header=False)
                 content_list.append(f"File: {file.name} | Sheet: {sheet_name}\n{csv_text}")
@@ -54,30 +53,37 @@ def process_smart_merge(api_key, target_files):
     for file in target_files:
         full_context += extract_file_content(file) + "\n\n"
     
-    # [수정] 300,000자 제한 로직 삭제 (Full Context 전송)
-    # Gemini 1.5 Flash는 약 100만 토큰(수백만 자)까지 처리가 가능합니다.
-    # 단, 데이터가 너무 방대할 경우(수십 MB 텍스트) 처리 속도가 느려질 수는 있습니다.
+    # Context 제한 없음 (Full processing)
 
     client = genai.Client(api_key=api_key)
 
-    # [프롬프트] 연말/분기 구분 + 모든 계정 나열
+    # [프롬프트] 모든 재무제표 식별 + 상세 계정 나열 지시
     prompt = f"""
-    You are a Financial Analyst creating a consolidated report.
+    You are a Forensic Accountant creating a fully detailed consolidated report.
 
-    [RULE 1: Annual Reports (Year-End)]
-    - If the data is for a full year (e.g., 2023, 2024), create simple year columns.
-    - **Format:** "2023", "2024"
-    - Do NOT split into "3M" or "Cumulative".
+    [MISSION]
+    Extract **EVERY SINGLE ACCOUNT** from ALL sheets found in the files.
+    Do NOT summarize. Do NOT omit details.
 
-    [RULE 2: Interim Reports (Quarterly/Semi-Annual)]
-    - If the data is for a quarter (e.g., 2025.1Q, 2025.3Q), you MUST capture BOTH "3 Months" and "Cumulative".
-    - **Format:** "2025.3Q(3M)", "2025.3Q(Cum)"
-    - Extract "Previous Period" data as well (e.g., "2024.3Q(3M)").
+    [RULE 1: Identify All Statement Types]
+    Classify every table into one of these types:
+    - **BS**: Balance Sheet (재무상태표)
+    - **IS**: Income Statement (손익계산서)
+    - **COGM**: Cost of Goods Manufactured (제조원가명세서) - *Crucial to capture detailed costs.*
+    - **SCE**: Statement of Changes in Equity (자본변동표)
+    - **RE**: Retained Earnings (이익잉여금처분계산서)
+    - **CF**: Cash Flow (현금흐름표)
 
-    [RULE 3: Data Integrity (No Summarization)]
-    - **List ALL unique accounts.** Even if they look similar, if the text is different, keep them separate rows.
-    - **Values:** Extract exact figures. If empty, use 0.
-    - **Order:** Assets -> Liabilities -> Equity -> Revenue -> Expense.
+    [RULE 2: Granularity (Lowest Level Details)]
+    - For **IS** and **COGM**, you MUST list the lowest level accounts.
+    - **Bad:** showing only "Selling & Admin Expenses" (Level 1).
+    - **Good:** showing "Salaries", "Rent", "Travel Expense", "Depreciation" (Level 3) under "Selling & Admin Expenses".
+    - **Capture EVERYTHING.** If a sheet has 100 rows, I want 100 rows in the output.
+
+    [RULE 3: Date Columns (Annual vs Interim)]
+    - **Annual (Year-End):** "2023", "2024" (Simple Year)
+    - **Interim (Quarter):** "2025.3Q(3M)", "2025.3Q(Cum)" (Split 3M/Cum)
+    - Capture "Previous Period" comparisons if available.
 
     [Input Data]
     {full_context}
@@ -86,13 +92,12 @@ def process_smart_merge(api_key, target_files):
     JSON Array Only.
     [
       {{
-        "Statement": "IS",
+        "Statement": "COGM",
         "Level": 3,
-        "Account_Name": "매출액",
-        "2023": 10000,
-        "2024": 12000,
-        "2025.3Q(3M)": 3500,
-        "2025.3Q(Cum)": 10500
+        "Account_Name": "원재료비",
+        "2023": 5000,
+        "2024": 6000,
+        "2025.3Q(Cum)": 4500
       }},
       ...
     ]
@@ -104,7 +109,6 @@ def process_smart_merge(api_key, target_files):
             contents=prompt
         )
     except Exception:
-        # 모델 폴백
         response = client.models.generate_content(
             model="gemini-1.5-flash",
             contents=prompt

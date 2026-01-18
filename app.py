@@ -61,7 +61,7 @@ with st.sidebar:
     unit_divisors = {"원": 1, "천원": 1000, "백만원": 1000000, "억원": 100000000}
     divisor = unit_divisors[unit_option]
 
-st.title("📑 통합 재무제표 보고서 (비교표시 포함)")
+st.title("📑 통합 재무제표 보고서 (전체 시트)")
 
 # --- 스타일 함수 ---
 def style_dataframe(row):
@@ -130,14 +130,14 @@ if uploaded_files:
 
 if uploaded_files and st.session_state.api_key:
     if st.button("보고서 생성 시작", type="primary"):
-        status = st.status("AI가 비교 기간(전기) 데이터까지 추출 중입니다...", expanded=True)
+        status = st.status("모든 재무제표의 세부 계정을 추출 중입니다...", expanded=True)
         try:
             raw_df = logic.process_smart_merge(st.session_state.api_key, uploaded_files)
             for col in raw_df.columns:
                 if col not in ['Statement', 'Level', 'Account_Name']:
                     raw_df[col] = pd.to_numeric(raw_df[col], errors='coerce').fillna(0)
             
-            # [값 없는 빈 열 삭제]
+            # 값 없는 빈 열 삭제
             numeric_cols = [c for c in raw_df.columns if c not in ['Statement', 'Level', 'Account_Name']]
             zero_cols = [c for c in numeric_cols if raw_df[c].abs().sum() == 0]
             if zero_cols:
@@ -155,7 +155,7 @@ if 'raw_data' in st.session_state:
     
     display_df = st.session_state['raw_data'].copy()
     
-    # [빈 행 제거]
+    # 빈 행 제거
     numeric_cols = [c for c in display_df.columns if c not in ['Statement', 'Level', 'Account_Name']]
     display_df = display_df[display_df[numeric_cols].abs().sum(axis=1) != 0]
     
@@ -164,7 +164,17 @@ if 'raw_data' in st.session_state:
             display_df[col] = display_df[col] / divisor
 
     available_types = display_df['Statement'].unique() if 'Statement' in display_df.columns else []
-    type_map = {'BS': '재무상태표', 'IS': '손익계산서', 'COGM': '제조원가명세서', 'CF': '현금흐름표', 'Other': '기타'}
+    
+    # [수정] 탭 이름 매핑 확장
+    type_map = {
+        'BS': '재무상태표', 
+        'IS': '손익계산서', 
+        'COGM': '제조원가명세서', 
+        'CF': '현금흐름표', 
+        'SCE': '자본변동표',
+        'RE': '이익잉여금처분',
+        'Other': '기타'
+    }
     
     if len(available_types) > 0:
         tabs = st.tabs([type_map.get(t, t) for t in available_types])
@@ -191,6 +201,6 @@ if 'raw_data' in st.session_state:
     st.download_button(
         f"📥 엑셀 다운로드 (단위: {unit_option})",
         data=excel_buffer.getvalue(),
-        file_name=f"Financial_Report_Comparative_{unit_option}.xlsx",
+        file_name=f"Financial_Report_Full_Details_{unit_option}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
