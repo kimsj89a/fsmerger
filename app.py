@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import io
@@ -22,27 +21,24 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 컬럼 정렬 함수 (복잡한 헤더 지원) ---
+# --- 컬럼 정렬 함수 ---
 def sort_columns_chronologically(columns):
     fixed_cols = ['Account_Name']
     date_cols = [c for c in columns if c not in ['Statement', 'Level', 'Account_Name']]
     
     def date_sort_key(col_name):
         s_name = str(col_name)
-        # 1. 연도 (4자리)
+        # 1. 연도
         year_match = re.search(r'(\d{4})', s_name)
         year = int(year_match.group(1)) if year_match else 9999
-        
-        # 2. 분기/월 (1Q, 3M 등)
+        # 2. 분기/월
         sub_val = 0
         if '1Q' in s_name: sub_val = 1
         elif '2Q' in s_name: sub_val = 4
         elif '3Q' in s_name: sub_val = 7
         elif '4Q' in s_name: sub_val = 10
-        
-        # 3. 누적 vs 3개월 (누적이 뒤로 가게)
+        # 3. 누적 우선순위
         is_cum = 1 if '누적' in s_name or 'Cum' in s_name or 'Year' in s_name else 0
-        
         return (year, sub_val, is_cum, s_name)
     
     sorted_date_cols = sorted(date_cols, key=date_sort_key)
@@ -65,7 +61,7 @@ with st.sidebar:
     unit_divisors = {"원": 1, "천원": 1000, "백만원": 1000000, "억원": 100000000}
     divisor = unit_divisors[unit_option]
 
-st.title("📑 통합 재무제표 보고서 (무손실 버전)")
+st.title("📑 통합 재무제표 보고서 (비교표시 포함)")
 
 # --- 스타일 함수 ---
 def style_dataframe(row):
@@ -74,7 +70,7 @@ def style_dataframe(row):
     elif level == 2: return ['background-color: #aec7e8; color: black; font-weight: bold;'] * len(row)
     return ['color: black;'] * len(row)
 
-# --- 엑셀 저장 함수 ---
+# --- 엑셀 저장 ---
 def save_styled_excel(df, sheet_name_map, unit_text):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
@@ -115,7 +111,6 @@ def save_styled_excel(df, sheet_name_map, unit_text):
                     elif level == 2:
                         cell.fill = fill_lv2
                         cell.font = font_lv2
-                    
                     if col_idx - 1 in numeric_col_indices:
                         cell.number_format = '#,##0'
             ws.column_dimensions['A'].width = 30
@@ -135,12 +130,18 @@ if uploaded_files:
 
 if uploaded_files and st.session_state.api_key:
     if st.button("보고서 생성 시작", type="primary"):
-        status = st.status("AI가 모든 계정을 빠짐없이 추출 중입니다...", expanded=True)
+        status = st.status("AI가 비교 기간(전기) 데이터까지 추출 중입니다...", expanded=True)
         try:
             raw_df = logic.process_smart_merge(st.session_state.api_key, uploaded_files)
             for col in raw_df.columns:
                 if col not in ['Statement', 'Level', 'Account_Name']:
                     raw_df[col] = pd.to_numeric(raw_df[col], errors='coerce').fillna(0)
+            
+            # [값 없는 빈 열 삭제]
+            numeric_cols = [c for c in raw_df.columns if c not in ['Statement', 'Level', 'Account_Name']]
+            zero_cols = [c for c in numeric_cols if raw_df[c].abs().sum() == 0]
+            if zero_cols:
+                raw_df = raw_df.drop(columns=zero_cols)
             
             st.session_state['raw_data'] = raw_df
             status.update(label="✅ 생성 완료!", state="complete", expanded=False)
@@ -154,7 +155,7 @@ if 'raw_data' in st.session_state:
     
     display_df = st.session_state['raw_data'].copy()
     
-    # [중요] 모든 값이 0인 행만 제거 (하나라도 값이 있으면 살림)
+    # [빈 행 제거]
     numeric_cols = [c for c in display_df.columns if c not in ['Statement', 'Level', 'Account_Name']]
     display_df = display_df[display_df[numeric_cols].abs().sum(axis=1) != 0]
     
@@ -176,7 +177,7 @@ if 'raw_data' in st.session_state:
                 sorted_cols = sort_columns_chronologically(all_cols)
                 final_cols = [c for c in sorted_cols if c in sub_df.columns]
 
-                format_dict = {col: "{:,.0f}" for col in numeric_cols}
+                format_dict = {col: "{:,.0f}" for col in numeric_cols if col in final_cols}
                 
                 st.dataframe(
                     sub_df[final_cols].style
@@ -190,6 +191,6 @@ if 'raw_data' in st.session_state:
     st.download_button(
         f"📥 엑셀 다운로드 (단위: {unit_option})",
         data=excel_buffer.getvalue(),
-        file_name=f"Financial_Report_Full_{unit_option}.xlsx",
+        file_name=f"Financial_Report_Comparative_{unit_option}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
