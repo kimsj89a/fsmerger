@@ -1,151 +1,116 @@
-# logic.py
 import pandas as pd
 from google import genai
 import json
 import openpyxl
-import os
+import io
 
-TAXONOMY_FILE = '2018taxonomy.xlsx'
-
-def load_internal_taxonomy():
+def extract_sheet_data(file):
     """
-    내장된 Taxonomy 파일을 읽어 텍스트로 변환
+    엑셀 파일을 읽어서 '텍스트 데이터'로 변환 (AI에게 구조를 통째로 넘기기 위함)
     """
-    if not os.path.exists(TAXONOMY_FILE):
-        raise FileNotFoundError(f"'{TAXONOMY_FILE}' 파일이 없습니다. 프로젝트 폴더에 파일을 넣어주세요.")
-
-    try:
-        wb = openpyxl.load_workbook(TAXONOMY_FILE, data_only=True)
-        all_text_data = []
+    context_list = []
+    wb = openpyxl.load_workbook(file, data_only=True)
+    
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        if ws.sheet_state == 'hidden' or ws.sheet_state == 'veryHidden':
+            continue
         
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            if ws.sheet_state == 'hidden' or ws.sheet_state == 'veryHidden':
-                continue
-            
-            data = ws.values
-            try:
-                columns = next(data)[0:]
-            except StopIteration:
-                continue
-                
-            df = pd.DataFrame(data, columns=columns)
-            sheet_csv = df.to_csv(index=False)
-            all_text_data.append(f"--- Standard Sheet: {sheet_name} ---\n{sheet_csv}")
-            
-        return "\n".join(all_text_data)
-    except Exception as e:
-        raise Exception(f"Taxonomy 파일 로딩 실패: {e}")
-
-def load_target_excel_files(uploaded_files):
-    """
-    업로드된 파일들을 읽어 텍스트 컨텍스트로 변환
-    """
-    target_context_list = []
-    
-    for file in uploaded_files:
+        data = ws.values
         try:
-            wb = openpyxl.load_workbook(file, data_only=True)
-            for sheet_name in wb.sheetnames:
-                ws = wb[sheet_name]
-                if ws.sheet_state == 'hidden' or ws.sheet_state == 'veryHidden':
-                    continue
-                
-                data = ws.values
-                try:
-                    columns = next(data)[0:]
-                    df = pd.DataFrame(data, columns=columns)
-                    # 데이터 출처 표시
-                    header = f"--- User Data (File: {file.name}, Sheet: {sheet_name}) ---"
-                    target_context_list.append(f"{header}\n{df.to_csv(index=False)}")
-                except:
-                    continue
-        except Exception as e:
-            print(f"파일 읽기 에러 ({file.name}): {e}")
+            # 첫 줄을 헤더로 가정
+            header = next(data)
+            # 빈 컬럼 제외
+            columns = [str(h) if h is not None else f"Unnamed_{i}" for i, h in enumerate(header)]
             
-    return "\n".join(target_context_list)
+            # 데이터프레임 생성
+            df = pd.DataFrame(data, columns=columns)
+            
+            # 너무 많은 빈 행/열 제거
+            df = df.dropna(how='all').dropna(axis=1, how='all')
+            
+            # CSV 텍스트로 변환
+            csv_text = df.to_csv(index=False)
+            context_list.append(f"FileName: {file.name} | Sheet: {sheet_name}\n{csv_text}")
+        except StopIteration:
+            continue
+            
+    return "\n\n".join(context_list)
 
-def process_financial_mapping(api_key, target_files):
+def process_smart_merge(api_key, target_files):
     """
-    전체 매핑 프로세스 실행 함수
+    여러 파일의 데이터를 AI에게 주어 '문맥 기반 병합' 수행
     """
-    # 1. Taxonomy 로드
-    taxonomy_context = load_internal_taxonomy()
-
-    # 2. 타겟 데이터 로드
-    full_target_context = load_target_excel_files(target_files)
+    # 1. 모든 엑셀 데이터를 텍스트로 추출
+    full_context = ""
+    for file in target_files:
+        full_context += extract_sheet_data(file) + "\n\n"
     
-    # 토큰 제한 처리 (약 10만자)
-    if len(full_target_context) > 100000:
-        full_target_context = full_target_context[:100000] + "\n...(Data Truncated)"
+    # 토큰 제한 (약 15만자 - Gemini 1.5 Flash/Pro는 충분함)
+    if len(full_context) > 150000:
+        full_context = full_context[:150000] + "\n...(Data Truncated)"
 
-    # 3. Gemini Client 생성
+    # 2. Gemini Client 생성
     client = genai.Client(api_key=api_key)
 
-    # 4. 프롬프트 작성
+    # 3. 프롬프트: 순서 보존과 끼워넣기(Interleaving) 로직 강조
     prompt = f"""
-    [Role]
-    당신은 전문 회계 감사 시스템입니다. User Data를 Standard Taxonomy 구조에 매핑하십시오.
-
-    [Input 1: Standard Taxonomy (정답지)]
-    {taxonomy_context}
-
-    [Input 2: User Data (문제지)]
-    {full_target_context}
-
-    [Mapping Rules]
-    1. **Strict Hierarchy:** 결과의 'Major', 'Medium', 'Account'는 오직 [Standard Taxonomy]에 있는 명칭만 사용하십시오.
-    2. **Fuzzy Matching:** User Data의 계정명과 100% 일치하지 않더라도, 회계적 의미가 같은 Standard 항목에 합산하십시오.
-    3. **Columns:** 연도(Year) 데이터를 찾아 컬럼으로 만드십시오.
+    You are a specialized Financial Data Merger.
+    User provided multiple financial statements (Excel data) from different years or entities.
     
+    [Goal]
+    Merge all data into a SINGLE table where rows are "Account Items" and columns are "Years" (e.g., 2022, 2023, 2024).
+
+    [Crucial Logic: "Context-Aware Interleaving"]
+    1. **Preserve Order (No Alphabetical Sort):** Do NOT sort account names alphabetically. Keep the logical flow of the original files (e.g., Assets -> Liabilities -> Equity).
+    2. **Insert Missing Items:** - If File A has [Sales, Operating Profit] and File B has [Sales, COGS, Operating Profit], the result must be [Sales, COGS, Operating Profit].
+       - You must detect where a missing account fits based on its neighbors in other files.
+    3. **Unify Synonyms:** If File A says "급여" and File B says "임직원급여", merge them into one row (choose the most standard name).
+    4. **Columns:** Detect years from the data (headers or values) and create columns like '2022', '2023'.
+
+    [Input Data]
+    {full_context}
+
     [Output Format]
-    JSON Array Only.
+    Return ONLY a JSON Array of objects.
+    Example:
     [
-        {{
-            "Standard_Major": "자산",
-            "Standard_Medium": "유동자산",
-            "Standard_Account": "현금및현금성자산",
-            "Original_Accounts": "현금, 예금 (매핑된 원본 계정들)",
-            "2022": 15000,
-            "2023": 20000
-        }},
-        ...
+      {{
+        "Account_Name": "매출액",
+        "2022": 1000,
+        "2023": 1200
+      }},
+      {{
+        "Account_Name": "매출원가",
+        "2022": 0,  <-- If missing in 2022, fill with 0
+        "2023": 500
+      }}
     ]
     """
 
-    # 5. AI 호출
+    # 4. AI 호출
     try:
         response = client.models.generate_content(
-            model="gemini-3-flash-preview",
+            model="gemini-3-flash-preview", # 없으면 gemini-1.5-flash로 자동 변경 로직은 app.py나 여기서 처리
             contents=prompt
         )
-    except Exception as e:
-        if "404" in str(e):
-             # 모델명 에러 시 자동 폴백 시도 (선택 사항)
-             response = client.models.generate_content(
-                model="gemini-1.5-flash",
-                contents=prompt
-            )
-        else:
-            raise e
+    except Exception:
+        # 모델명 에러시 fallback
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt
+        )
 
-    # 6. JSON 파싱
+    # 5. 결과 파싱
     cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
+    
+    # JSON 부분만 추출
     if "[" in cleaned_text and "]" in cleaned_text:
         s = cleaned_text.find("[")
         e = cleaned_text.rfind("]") + 1
         cleaned_text = cleaned_text[s:e]
     
-    result_data = json.loads(cleaned_text)
-    df = pd.DataFrame(result_data)
-
-    # 7. 컬럼 정리
-    cols = df.columns.tolist()
-    std_cols = ['Standard_Major', 'Standard_Medium', 'Standard_Account', 'Original_Accounts']
-    other_cols = [c for c in cols if c not in std_cols]
+    data_list = json.loads(cleaned_text)
+    df = pd.DataFrame(data_list)
     
-    # 실제 존재하는 컬럼만 선택
-    final_std = [c for c in std_cols if c in df.columns]
-    final_other = sorted([c for c in other_cols]) # 연도순 정렬 등
-    
-    return df[final_std + final_other]
+    return df

@@ -1,65 +1,59 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import io
-import logic  # <--- 우리가 만든 logic.py를 가져옵니다
+import logic # logic.py 임포트
 
-# 페이지 설정
-st.set_page_config(page_title="Standard Taxonomy Mapper (Modular)", layout="wide")
-st.title("📊 표준 택소노미 기반 재무제표 매핑")
-st.markdown("내장된 **2018 Taxonomy**를 기준으로 데이터를 매핑합니다. (로직 분리 버전)")
+st.set_page_config(page_title="Context-Aware Merger", layout="wide")
 
-# --- 설정 ---
+st.title("🔗 문맥 기반 재무제표 병합 (Smart Merge)")
+st.markdown("""
+**순서 보존 병합:** 가나다순 정렬이 아닙니다.  
+2022년엔 없고 2023년에만 생긴 계정이 있다면, **2023년의 위치(문맥)를 파악해 2022년 목록 사이사이에 끼워넣습니다.**
+""")
+
+# API 키 설정
 if 'api_key' not in st.session_state:
     st.session_state.api_key = ''
 
 with st.sidebar:
     st.header("설정")
-    api_input = st.text_input("Gemini API Key", type="password", value=st.session_state.api_key)
-    if api_input:
-        st.session_state.api_key = api_input
-    
-    st.info("Logic Module Loaded")
+    api_key = st.text_input("Gemini API Key", type="password", value=st.session_state.api_key)
+    if api_key:
+        st.session_state.api_key = api_key
 
-# --- 메인 실행 ---
-target_files = st.file_uploader("분석할 엑셀 파일 업로드", accept_multiple_files=True, type=['xlsx'])
+# 파일 업로드
+uploaded_files = st.file_uploader("연도별 엑셀 파일을 모두 선택하세요", accept_multiple_files=True, type=['xlsx'])
 
-if target_files and st.session_state.api_key:
-    if st.button("매핑 시작"):
-        # UI용 컨테이너
+if uploaded_files and st.session_state.api_key:
+    if st.button("스마트 병합 시작"):
         status = st.status("작업 진행 중...", expanded=True)
         
         try:
-            # 1. 로직 호출 (모든 복잡한 처리는 logic.py가 담당)
-            status.write("📂 파일 읽기 및 AI 분석 요청 중...")
+            status.write("🧠 AI가 파일들의 흐름을 분석하고 있습니다...")
             
-            # logic.py의 함수 실행
-            result_df = logic.process_financial_mapping(
+            # logic.py의 스마트 병합 함수 호출
+            merged_df = logic.process_smart_merge(
                 api_key=st.session_state.api_key,
-                target_files=target_files
+                target_files=uploaded_files
             )
             
-            status.update(label="✅ 작업 완료!", state="complete", expanded=False)
-
-            # 2. 결과 표시
-            st.subheader("🏆 매핑 결과")
-            st.dataframe(result_df, use_container_width=True)
-
-            # 3. 다운로드
+            status.update(label="✅ 병합 완료!", state="complete", expanded=False)
+            
+            st.subheader("📊 병합 결과")
+            st.dataframe(merged_df, use_container_width=True)
+            
+            # 다운로드
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                result_df.to_excel(writer, index=False)
-            
+                merged_df.to_excel(writer, index=False, sheet_name="Smart_Merged")
+                
             st.download_button(
-                "📥 엑셀 다운로드",
+                "📥 엑셀로 다운로드",
                 data=buffer.getvalue(),
-                file_name="mapped_result.xlsx",
+                file_name="smart_merged_report.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
-        except FileNotFoundError as e:
-            status.update(label="🚨 파일 에러", state="error")
-            st.error(str(e))
+            
         except Exception as e:
-            status.update(label="🚨 실행 에러", state="error")
-            st.error(f"오류가 발생했습니다: {e}")
+            status.update(label="❌ 오류 발생", state="error")
+            st.error(f"에러 내용: {e}")
