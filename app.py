@@ -64,7 +64,7 @@ if uploaded_files and api_key:
             
             # [핵심 변경] generate_content 호출 방식 변경
             response = client.models.generate_content(
-                model="gemini-1.5-flash",
+                model="gemini-3-flash-preview",
                 contents=prompt
             )
             
