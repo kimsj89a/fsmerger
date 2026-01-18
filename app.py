@@ -2,7 +2,7 @@
 import streamlit as st
 import pandas as pd
 import io
-import re  # 정규표현식 (날짜 추출용)
+import re
 import logic 
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
@@ -22,35 +22,30 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- [추가] 컬럼 연도순 정렬 함수 ---
+# --- 컬럼 정렬 함수 (복잡한 헤더 지원) ---
 def sort_columns_chronologically(columns):
-    """
-    컬럼 리스트를 받아서 [Account_Name, 2022, 2023, 2024, 2025.1Q ...] 순서로 정렬
-    """
-    # 고정 컬럼 (앞부분)
     fixed_cols = ['Account_Name']
-    
-    # 날짜 컬럼만 추출
     date_cols = [c for c in columns if c not in ['Statement', 'Level', 'Account_Name']]
     
     def date_sort_key(col_name):
-        # 1. 연도 추출 (4자리 숫자)
-        year_match = re.search(r'(\d{4})', str(col_name))
+        s_name = str(col_name)
+        # 1. 연도 (4자리)
+        year_match = re.search(r'(\d{4})', s_name)
         year = int(year_match.group(1)) if year_match else 9999
         
-        # 2. 분기/월 추출 (없으면 0)
-        # 3Q, 12M 등의 숫자를 찾아서 보조 정렬 키로 사용
-        sub_match = re.search(r'(\d+)[QM]', str(col_name))
-        sub_val = int(sub_match.group(1)) if sub_match else 0
+        # 2. 분기/월 (1Q, 3M 등)
+        sub_val = 0
+        if '1Q' in s_name: sub_val = 1
+        elif '2Q' in s_name: sub_val = 4
+        elif '3Q' in s_name: sub_val = 7
+        elif '4Q' in s_name: sub_val = 10
         
-        # 3. 누적/3개월 구분 (누적이 보통 뒤에 옴)
-        is_cum = 1 if '누적' in str(col_name) or 'Cum' in str(col_name) else 0
+        # 3. 누적 vs 3개월 (누적이 뒤로 가게)
+        is_cum = 1 if '누적' in s_name or 'Cum' in s_name or 'Year' in s_name else 0
         
-        return (year, sub_val, is_cum, col_name)
+        return (year, sub_val, is_cum, s_name)
     
-    # 정렬 실행
     sorted_date_cols = sorted(date_cols, key=date_sort_key)
-    
     return fixed_cols + sorted_date_cols
 
 # --- 사이드바 ---
@@ -70,16 +65,13 @@ with st.sidebar:
     unit_divisors = {"원": 1, "천원": 1000, "백만원": 1000000, "억원": 100000000}
     divisor = unit_divisors[unit_option]
 
-st.title("📑 통합 재무제표 보고서")
+st.title("📑 통합 재무제표 보고서 (무손실 버전)")
 
 # --- 스타일 함수 ---
 def style_dataframe(row):
-    styles = [''] * len(row)
     level = row.get('Level', 3)
-    if level == 1:
-        return ['background-color: #1f77b4; color: white; font-weight: bold;'] * len(row)
-    elif level == 2:
-        return ['background-color: #aec7e8; color: black; font-weight: bold;'] * len(row)
+    if level == 1: return ['background-color: #1f77b4; color: white; font-weight: bold;'] * len(row)
+    elif level == 2: return ['background-color: #aec7e8; color: black; font-weight: bold;'] * len(row)
     return ['color: black;'] * len(row)
 
 # --- 엑셀 저장 함수 ---
@@ -93,10 +85,8 @@ def save_styled_excel(df, sheet_name_map, unit_text):
             if 'Statement' in df.columns: sub_df = df[df['Statement'] == stmt].copy()
             else: sub_df = df.copy()
             
-            # [수정] 정렬된 컬럼 순서 적용
             all_cols = sub_df.columns.tolist()
             sorted_cols = sort_columns_chronologically(all_cols)
-            # 실제 존재하는 컬럼만 필터링
             final_cols = [c for c in sorted_cols if c in sub_df.columns]
             
             sheet_title = sheet_name_map.get(stmt, stmt)[:30]
@@ -111,7 +101,6 @@ def save_styled_excel(df, sheet_name_map, unit_text):
             fill_lv2 = PatternFill(start_color="AEC7E8", end_color="AEC7E8", fill_type="solid")
             font_lv2 = Font(color="000000", bold=True)
             
-            # 숫자 컬럼 인덱스 찾기
             numeric_col_indices = [i+1 for i, c in enumerate(final_cols) if c != 'Account_Name']
             
             sub_df = sub_df.reset_index(drop=True)
@@ -129,12 +118,11 @@ def save_styled_excel(df, sheet_name_map, unit_text):
                     
                     if col_idx - 1 in numeric_col_indices:
                         cell.number_format = '#,##0'
-
             ws.column_dimensions['A'].width = 30
     return buffer
 
 # --- 메인 로직 ---
-uploaded_files = st.file_uploader("파일 업로드 (Drag & Drop)", accept_multiple_files=True, type=['xlsx', 'xls', 'csv', 'pdf', 'docx', 'txt'])
+uploaded_files = st.file_uploader("파일 업로드 (Excel, PDF 등)", accept_multiple_files=True, type=['xlsx', 'xls', 'csv', 'pdf', 'docx', 'txt'])
 
 if uploaded_files:
     st.markdown(f"##### 📂 업로드된 파일 목록 ({len(uploaded_files)}개)")
@@ -147,7 +135,7 @@ if uploaded_files:
 
 if uploaded_files and st.session_state.api_key:
     if st.button("보고서 생성 시작", type="primary"):
-        status = st.status("파일 분석 및 통합 중...", expanded=True)
+        status = st.status("AI가 모든 계정을 빠짐없이 추출 중입니다...", expanded=True)
         try:
             raw_df = logic.process_smart_merge(st.session_state.api_key, uploaded_files)
             for col in raw_df.columns:
@@ -166,12 +154,10 @@ if 'raw_data' in st.session_state:
     
     display_df = st.session_state['raw_data'].copy()
     
-    # [수정] 1. 값이 전부 0인 행 제거 (빈 공간 제거)
+    # [중요] 모든 값이 0인 행만 제거 (하나라도 값이 있으면 살림)
     numeric_cols = [c for c in display_df.columns if c not in ['Statement', 'Level', 'Account_Name']]
-    # 숫자 컬럼 합계가 0이 아닌 행만 남김 (절대값 합계 사용)
-    display_df = display_df[display_df[numeric_cols].abs().sum(axis=1) > 0]
+    display_df = display_df[display_df[numeric_cols].abs().sum(axis=1) != 0]
     
-    # 2. 단위 변환
     for col in numeric_cols:
         if divisor > 1:
             display_df[col] = display_df[col] / divisor
@@ -186,12 +172,10 @@ if 'raw_data' in st.session_state:
             with tabs[i]:
                 sub_df = display_df[display_df['Statement'] == stmt_type].copy()
                 
-                # [수정] 컬럼 정렬 (과거 -> 현재)
                 all_cols = sub_df.columns.tolist()
                 sorted_cols = sort_columns_chronologically(all_cols)
                 final_cols = [c for c in sorted_cols if c in sub_df.columns]
 
-                # 포맷팅
                 format_dict = {col: "{:,.0f}" for col in numeric_cols}
                 
                 st.dataframe(
@@ -204,8 +188,8 @@ if 'raw_data' in st.session_state:
     
     excel_buffer = save_styled_excel(display_df, type_map, unit_option)
     st.download_button(
-        f"📥 엑셀 다운로드 (현재 단위: {unit_option})",
+        f"📥 엑셀 다운로드 (단위: {unit_option})",
         data=excel_buffer.getvalue(),
-        file_name=f"Financial_Report_{unit_option}.xlsx",
+        file_name=f"Financial_Report_Full_{unit_option}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )

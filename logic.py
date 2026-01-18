@@ -8,14 +8,19 @@ import pypdf
 import docx
 
 def extract_file_content(file):
+    """
+    파일 내용을 텍스트로 변환 (기존과 동일)
+    """
     file_ext = file.name.split('.')[-1].lower()
     content_list = []
     
     try:
         if file_ext in ['xlsx', 'xls']:
             engine = 'openpyxl' if file_ext == 'xlsx' else 'xlrd'
+            # header=None으로 읽어서 모든 텍스트를 다 가져옴
             dfs = pd.read_excel(file, sheet_name=None, engine=engine, header=None)
             for sheet_name, df in dfs.items():
+                # 빈 행/열 제거
                 df = df.dropna(how='all').dropna(axis=1, how='all')
                 csv_text = df.to_csv(index=False, header=False)
                 content_list.append(f"File: {file.name} | Sheet: {sheet_name}\n{csv_text}")
@@ -46,35 +51,38 @@ def extract_file_content(file):
     return "\n\n".join(content_list)
 
 def process_smart_merge(api_key, target_files):
+    # 1. 컨텍스트 생성
     full_context = ""
     for file in target_files:
         full_context += extract_file_content(file) + "\n\n"
     
-    if len(full_context) > 200000:
-        full_context = full_context[:200000] + "\n...(Truncated)"
+    # 컨텍스트 길이 제한 (약 30만자까지 늘림 - Flash 모델은 처리 가능)
+    if len(full_context) > 300000:
+        full_context = full_context[:300000] + "\n...(Truncated)"
 
     client = genai.Client(api_key=api_key)
 
-    # [수정] 프롬프트 강화: 동의어 통합 + 빈 줄 방지
+    # [핵심 수정] 프롬프트: 완전 보존(Union) 지시
     prompt = f"""
-    You are an expert CFO consolidating financial reports.
+    You are a Forensic Accountant. Your job is to create a consolidated spreadsheet that includes **EVERY SINGLE ACCOUNT ITEM** from the source files.
 
-    [Goal]
-    Create a SINGLE, DENSE table. Minimize empty cells.
+    [MISSION: ZERO OMISSION]
+    1. **List ALL unique account names.** If File A has "Account X" and File B does not, you MUST list "Account X" and put 0 for File B.
+    2. **Do NOT Summarize.** Do not merge "Travel Expense" and "Transportation Expense" unless they are exactly the same string. Keep them as separate rows.
+    3. **Preserve Granularity.** If the source has detail rows, keep them. Do not just show the Totals.
 
-    [CRITICAL RULE 1: Aggressive Synonym Merge]
-    - **Do NOT create separate rows** for synonyms. Merge them into one standard account name.
-    - Example: If File A has "Sales" and File B has "Revenue", output ONE row "Revenue" (or "Sales").
-    - Example: "Ordinary Deposits" and "Bank Deposits" -> Merge to "Cash & Deposits".
-    - **Avoid Sparse Matrix:** Ensure year columns are filled in the SAME row as much as possible.
+    [Logic 1: Columns (Time Periods)]
+    - Detect ALL time headers (Years, Quarters, Months).
+    - Handle Split Headers: "2025.3Q (3M)" and "2025.3Q (Cum)" must be separate columns.
 
-    [CRITICAL RULE 2: Date Columns]
-    - Detect ALL periods (Years, Quarters).
-    - If a period has "3M" and "Cumulative", keep both as separate columns (e.g., "2025.3Q(3M)", "2025.3Q(Cum)").
+    [Logic 2: Structure]
+    - **Statement:** BS, IS, COGM, CF, Other
+    - **Level:** 1 (Total), 2 (Subtotal), 3 (Detail)
+    - **Account_Name:** The exact name from the source file.
 
-    [Logic 3: Hierarchy]
-    - Assign 'Level' (1=Total, 2=Subtotal, 3=Detail).
-    - Classify 'Statement': BS, IS, COGM, CF, Other.
+    [Logic 3: Order]
+    - Maintain standard accounting order (Assets -> Liabilities -> Equity -> Revenue -> Expense).
+    - Do NOT sort alphabetically.
 
     [Input Data]
     {full_context}
@@ -84,11 +92,12 @@ def process_smart_merge(api_key, target_files):
     [
       {{
         "Statement": "IS",
-        "Level": 1,
-        "Account_Name": "매출액",
-        "2023": 10000,
-        "2024": 11000,
-        "2025.3Q(Cum)": 12000
+        "Level": 3,
+        "Account_Name": "복리후생비",
+        "2023": 1000,
+        "2024": 1200,
+        "2025.3Q(3M)": 300,
+        "2025.3Q(Cum)": 900
       }},
       ...
     ]
@@ -100,11 +109,13 @@ def process_smart_merge(api_key, target_files):
             contents=prompt
         )
     except Exception:
+        # 모델 폴백
         response = client.models.generate_content(
             model="gemini-1.5-flash",
             contents=prompt
         )
 
+    # 파싱 로직
     cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
     if "[" in cleaned_text and "]" in cleaned_text:
         s = cleaned_text.find("[")
