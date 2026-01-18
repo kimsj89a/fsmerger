@@ -2,3 +2,6 @@ streamlit
 pandas
 openpyxl
 google-genai
+xlrd
+pypdf
+python-docx
