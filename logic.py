@@ -5,9 +5,6 @@ import openpyxl
 import io
 
 def extract_sheet_data(file):
-    """
-    엑셀 파일을 읽어서 '텍스트 데이터'로 변환 (AI에게 구조를 통째로 넘기기 위함)
-    """
     context_list = []
     wb = openpyxl.load_workbook(file, data_only=True)
     
@@ -15,96 +12,92 @@ def extract_sheet_data(file):
         ws = wb[sheet_name]
         if ws.sheet_state == 'hidden' or ws.sheet_state == 'veryHidden':
             continue
-        
         data = ws.values
         try:
-            # 첫 줄을 헤더로 가정
             header = next(data)
-            # 빈 컬럼 제외
             columns = [str(h) if h is not None else f"Unnamed_{i}" for i, h in enumerate(header)]
-            
-            # 데이터프레임 생성
             df = pd.DataFrame(data, columns=columns)
-            
-            # 너무 많은 빈 행/열 제거
             df = df.dropna(how='all').dropna(axis=1, how='all')
-            
-            # CSV 텍스트로 변환
             csv_text = df.to_csv(index=False)
             context_list.append(f"FileName: {file.name} | Sheet: {sheet_name}\n{csv_text}")
         except StopIteration:
             continue
-            
     return "\n\n".join(context_list)
 
 def process_smart_merge(api_key, target_files):
-    """
-    여러 파일의 데이터를 AI에게 주어 '문맥 기반 병합' 수행
-    """
-    # 1. 모든 엑셀 데이터를 텍스트로 추출
+    # 1. 데이터 텍스트화
     full_context = ""
     for file in target_files:
         full_context += extract_sheet_data(file) + "\n\n"
     
-    # 토큰 제한 (약 15만자 - Gemini 1.5 Flash/Pro는 충분함)
     if len(full_context) > 150000:
         full_context = full_context[:150000] + "\n...(Data Truncated)"
 
-    # 2. Gemini Client 생성
     client = genai.Client(api_key=api_key)
 
-    # 3. 프롬프트: 순서 보존과 끼워넣기(Interleaving) 로직 강조
+    # 2. 프롬프트 강화: 재무제표 타입 분류 & 계층 구조 시각화
     prompt = f"""
-    You are a specialized Financial Data Merger.
-    User provided multiple financial statements (Excel data) from different years or entities.
-    
+    You are a Chief Financial Officer (CFO).
+    Analyze the provided multiple Excel files and merge them into a consolidated financial report.
+
     [Goal]
-    Merge all data into a SINGLE table where rows are "Account Items" and columns are "Years" (e.g., 2022, 2023, 2024).
+    Create a unified table with 'Year' columns, structured hierarchically, and separated by Financial Statement Type.
 
-    [Crucial Logic: "Context-Aware Interleaving"]
-    1. **Preserve Order (No Alphabetical Sort):** Do NOT sort account names alphabetically. Keep the logical flow of the original files (e.g., Assets -> Liabilities -> Equity).
-    2. **Insert Missing Items:** - If File A has [Sales, Operating Profit] and File B has [Sales, COGS, Operating Profit], the result must be [Sales, COGS, Operating Profit].
-       - You must detect where a missing account fits based on its neighbors in other files.
-    3. **Unify Synonyms:** If File A says "급여" and File B says "임직원급여", merge them into one row (choose the most standard name).
-    4. **Columns:** Detect years from the data (headers or values) and create columns like '2022', '2023'.
+    [Logic 1: Statement Classification]
+    For every row, identify which Financial Statement it belongs to:
+    - **BS**: Balance Sheet (재무상태표 - 자산, 부채, 자본)
+    - **IS**: Income Statement (손익계산서 - 매출, 비용, 이익)
+    - **COGM**: Cost of Goods Manufactured (제조원가명세서 - 재료비, 노무비, 경비)
+    - **CF**: Cash Flow (현금흐름표)
 
+    [Logic 2: Hierarchy & Styling]
+    Classify the 'Level' of each account to create a visual hierarchy:
+    - **Level 1 (Major):** Top category (e.g., 자산총계, 유동자산, 부채총계).
+    - **Level 2 (Medium):** Sub-category (e.g., 현금및현금성자산, 매출채권).
+    - **Level 3 (Detail):** Specific items (e.g., 보통예금, 외상매출금).
+    *Tip: If the row is a 'Total' or 'Sum' line, it is usually Level 1.*
+
+    [Logic 3: Context-Aware Merge]
+    - **Preserve Order:** Do not sort alphabetically. Keep the logical accounting flow (Asset -> Liability -> Equity).
+    - **Interleave:** Insert missing accounts from different years into their logical position.
+    
     [Input Data]
     {full_context}
 
     [Output Format]
-    Return ONLY a JSON Array of objects.
-    Example:
+    JSON Array Only.
     [
       {{
-        "Account_Name": "매출액",
-        "2022": 1000,
-        "2023": 1200
+        "Statement": "BS",
+        "Level": 1,
+        "Account_Name": "자산총계",
+        "2022": 10000,
+        "2023": 12000
       }},
       {{
-        "Account_Name": "매출원가",
-        "2022": 0,  <-- If missing in 2022, fill with 0
-        "2023": 500
-      }}
+        "Statement": "BS",
+        "Level": 2,
+        "Account_Name": "유동자산",
+        "2022": 5000,
+        "2023": 6000
+      }},
+      ...
     ]
     """
 
-    # 4. AI 호출
     try:
         response = client.models.generate_content(
-            model="gemini-3-flash-preview", # 없으면 gemini-1.5-flash로 자동 변경 로직은 app.py나 여기서 처리
+            model="gemini-3-flash-preview", 
             contents=prompt
         )
     except Exception:
-        # 모델명 에러시 fallback
         response = client.models.generate_content(
             model="gemini-1.5-flash",
             contents=prompt
         )
 
-    # 5. 결과 파싱
+    # 3. 파싱
     cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
-    
-    # JSON 부분만 추출
     if "[" in cleaned_text and "]" in cleaned_text:
         s = cleaned_text.find("[")
         e = cleaned_text.rfind("]") + 1
@@ -112,5 +105,15 @@ def process_smart_merge(api_key, target_files):
     
     data_list = json.loads(cleaned_text)
     df = pd.DataFrame(data_list)
-    
+
+    # 4. 시각적 들여쓰기 처리 (Excel/화면용)
+    # Level에 따라 Account_Name 앞에 공백 특수문자 추가
+    def format_name(row):
+        indent = "    " * (int(row.get('Level', 3)) - 1) # 레벨 1=0칸, 2=4칸, 3=8칸
+        prefix = "🔹 " if row.get('Level') == 1 else "   " 
+        return f"{indent}{prefix}{row['Account_Name']}"
+
+    if 'Level' in df.columns and 'Account_Name' in df.columns:
+        df['Display_Name'] = df.apply(format_name, axis=1)
+
     return df
