@@ -74,7 +74,7 @@ def process_smart_merge(api_key, target_files):
     - Note: Balance Sheet (BS) usually only has "Period End" (treat as Cum). Income Statement (IS) has both.
 
     [RULE 3: Data Integrity]
-    - **List ALL unique accounts.** Do not group "Sales" and "Other Sales" unless they are clearly identical.
+    - **List ALL accounts.** Do not group unless they are clearly identical.
     - **Values:** Extract exact figures. If empty, use 0.
     - **Order:** Assets -> Liabilities -> Equity -> Revenue -> Expense.
 
