@@ -16,9 +16,10 @@ def extract_file_content(file):
     try:
         if file_ext in ['xlsx', 'xls']:
             engine = 'openpyxl' if file_ext == 'xlsx' else 'xlrd'
-            # header=None으로 읽어서 헤더 구조를 AI가 통째로 보게 함
+            # header=None으로 읽어서 모든 데이터를 있는 그대로 가져옴
             dfs = pd.read_excel(file, sheet_name=None, engine=engine, header=None)
             for sheet_name, df in dfs.items():
+                # 데이터가 없는 빈 행/열만 제거하고 전송
                 df = df.dropna(how='all').dropna(axis=1, how='all')
                 csv_text = df.to_csv(index=False, header=False)
                 content_list.append(f"File: {file.name} | Sheet: {sheet_name}\n{csv_text}")
@@ -53,28 +54,28 @@ def process_smart_merge(api_key, target_files):
     for file in target_files:
         full_context += extract_file_content(file) + "\n\n"
     
-    if len(full_context) > 300000:
-        full_context = full_context[:300000] + "\n...(Truncated)"
+    # [수정] 300,000자 제한 로직 삭제 (Full Context 전송)
+    # Gemini 1.5 Flash는 약 100만 토큰(수백만 자)까지 처리가 가능합니다.
+    # 단, 데이터가 너무 방대할 경우(수십 MB 텍스트) 처리 속도가 느려질 수는 있습니다.
 
     client = genai.Client(api_key=api_key)
 
-    # [프롬프트] 로직 간소화: 연말 vs 분기 구분 명확화
+    # [프롬프트] 연말/분기 구분 + 모든 계정 나열
     prompt = f"""
     You are a Financial Analyst creating a consolidated report.
-    Simplify the merging logic based on two report types.
 
     [RULE 1: Annual Reports (Year-End)]
     - If the data is for a full year (e.g., 2023, 2024), create simple year columns.
     - **Format:** "2023", "2024"
-    - Do NOT split into "3M" or "Cumulative" for annual reports (it's always 12M/Cumulative).
+    - Do NOT split into "3M" or "Cumulative".
 
     [RULE 2: Interim Reports (Quarterly/Semi-Annual)]
     - If the data is for a quarter (e.g., 2025.1Q, 2025.3Q), you MUST capture BOTH "3 Months" and "Cumulative".
     - **Format:** "2025.3Q(3M)", "2025.3Q(Cum)"
-    - Note: Balance Sheet (BS) usually only has "Period End" (treat as Cum). Income Statement (IS) has both.
+    - Extract "Previous Period" data as well (e.g., "2024.3Q(3M)").
 
-    [RULE 3: Data Integrity]
-    - **List ALL accounts.** Do not group unless they are clearly identical.
+    [RULE 3: Data Integrity (No Summarization)]
+    - **List ALL unique accounts.** Even if they look similar, if the text is different, keep them separate rows.
     - **Values:** Extract exact figures. If empty, use 0.
     - **Order:** Assets -> Liabilities -> Equity -> Revenue -> Expense.
 
@@ -88,10 +89,10 @@ def process_smart_merge(api_key, target_files):
         "Statement": "IS",
         "Level": 3,
         "Account_Name": "매출액",
-        "2023": 10000,           // Annual
-        "2024": 12000,           // Annual
-        "2025.3Q(3M)": 3500,     // Interim (3 Months)
-        "2025.3Q(Cum)": 10500    // Interim (Cumulative)
+        "2023": 10000,
+        "2024": 12000,
+        "2025.3Q(3M)": 3500,
+        "2025.3Q(Cum)": 10500
       }},
       ...
     ]
@@ -103,6 +104,7 @@ def process_smart_merge(api_key, target_files):
             contents=prompt
         )
     except Exception:
+        # 모델 폴백
         response = client.models.generate_content(
             model="gemini-1.5-flash",
             contents=prompt
