@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+# [신버전] google-genai 라이브러리 import
 from google import genai
 import io
 import json
@@ -14,9 +15,7 @@ st.markdown("여러 엑셀 파일을 업로드하면 **하나로 합치고**, AI
 with st.sidebar:
     st.header("설정")
     api_key = st.text_input("Gemini API Key", type="password", placeholder="여기에 키를 입력하세요")
-    if api_key:
-        genai.configure(api_key=api_key)
-    else:
+    if not api_key:
         st.warning("먼저 API 키를 입력해주세요.")
 
 # 1. 파일 업로드
@@ -31,51 +30,47 @@ if uploaded_files and api_key:
         try:
             progress_text.text("📂 파일 읽는 중...")
             for file in uploaded_files:
-                # sheet_name=None이면 모든 시트를 딕셔너리로 가져옴
                 xls = pd.read_excel(file, sheet_name=None)
-                
                 for sheet_name, df in xls.items():
-                    # 데이터 출처 표시 (파일명 - 시트명)
                     df['Source'] = f"{file.name} - {sheet_name}"
                     all_data.append(df)
             
-            # 리스트에 모인 데이터프레임을 하나로 합침 (concat)
             merged_df = pd.concat(all_data, ignore_index=True)
+            st.success(f"✅ 총 {len(uploaded_files)}개 파일 병합 완료! ({len(merged_df)}행)")
             
-            st.success(f"✅ 총 {len(uploaded_files)}개 파일, {len(all_data)}개 시트 병합 완료! ({len(merged_df)}행)")
-            
-            # 원본 병합 데이터 보여주기 (접을 수 있게)
             with st.expander("원본 병합 데이터 보기"):
                 st.dataframe(merged_df)
 
-            # --- 2단계: Gemini AI 분석 ---
-            progress_text.text("🤖 AI가 데이터를 분석하고 연도별로 정리하는 중... (잠시만 기다려주세요)")
+            # --- 2단계: Gemini AI 분석 (신버전 SDK 적용) ---
+            progress_text.text("🤖 AI가 데이터를 분석하고 연도별로 정리하는 중...")
             
-            # 데이터가 너무 크면 토큰 비용 절약을 위해 CSV 텍스트로 변환 및 길이 제한
             csv_data = merged_df.to_csv(index=False)
             if len(csv_data) > 50000:
-                csv_data = csv_data[:50000] + "\n...(데이터가 너무 길어 생략됨)"
+                csv_data = csv_data[:50000] + "\n...(생략됨)"
 
-            model = genai.GenerativeModel('gemini-3-flash-preview')
+            # [핵심 변경] Client 객체 생성 (신버전 방식)
+            client = genai.Client(api_key=api_key)
             
             prompt = f"""
             너는 데이터 분석 전문가야. 아래 CSV 데이터를 분석해서 "연도별 비교(Yearly Comparison)"가 가능한 표로 재구성해줘.
-
             [지시사항]
-            1. 데이터를 분석하여 'Category'(구분)를 행으로, '2022', '2023', '2024' 등 연도를 열(Column)로 만들어라.
-            2. 데이터 안에서 연도를 스스로 추론해서 배치해라.
-            3. 숫자는 정확하게 집계하고, 값이 없으면 0으로 채워라.
-            4. 결과는 오직 JSON 데이터만 출력해라. (마크다운 코드블럭 ```json 쓰지 말 것)
-            5. JSON 형식: [ {{"Category": "매출", "2023": 100, "2024": 120}}, ... ]
-
+            1. 'Category'(구분)를 행으로, '2022', '2023', '2024' 등 연도를 열(Column)로 만들어라.
+            2. 결과는 오직 JSON 데이터만 출력해라. (마크다운 ```json 금지)
+            3. JSON 형식: [ {{"Category": "매출", "2023": 100, "2024": 120}}, ... ]
+            
             [데이터]:
             {csv_data}
             """
             
-            response = model.generate_content(prompt)
+            # [핵심 변경] generate_content 호출 방식 변경
+            response = client.models.generate_content(
+                model="gemini-1.5-flash",
+                contents=prompt
+            )
             
             # 결과 처리
             try:
+                # 신버전 SDK에서도 response.text로 텍스트 접근 가능
                 cleaned_text = response.text.replace("```json", "").replace("```", "").strip()
                 ai_result_json = json.loads(cleaned_text)
                 ai_df = pd.DataFrame(ai_result_json)
@@ -84,7 +79,6 @@ if uploaded_files and api_key:
                 st.dataframe(ai_df, use_container_width=True)
                 
                 # --- 3단계: 엑셀 다운로드 ---
-                # 메모리 상에 엑셀 파일 생성
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                     ai_df.to_excel(writer, sheet_name='AI_Analysis', index=False)
@@ -98,7 +92,7 @@ if uploaded_files and api_key:
                 )
                 
             except json.JSONDecodeError:
-                st.error("AI 응답을 표로 변환하는데 실패했습니다. 텍스트로 결과를 보여드릴게요.")
+                st.error("AI 응답 변환 실패. 원본 텍스트:")
                 st.text_area("AI 응답", response.text)
                 
         except Exception as e:
