@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import google-genai as genai
+import google-genai as gemini
 import io
 import json
 
@@ -15,7 +15,7 @@ with st.sidebar:
     st.header("설정")
     api_key = st.text_input("Gemini API Key", type="password", placeholder="여기에 키를 입력하세요")
     if api_key:
-        genai.configure(api_key=api_key)
+        gemini.configure(api_key=api_key)
     else:
         st.warning("먼저 API 키를 입력해주세요.")
 
@@ -56,7 +56,7 @@ if uploaded_files and api_key:
             if len(csv_data) > 50000:
                 csv_data = csv_data[:50000] + "\n...(데이터가 너무 길어 생략됨)"
 
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            model = gemini.GenerativeModel('gemini-3-flash-preview')
             
             prompt = f"""
             너는 데이터 분석 전문가야. 아래 CSV 데이터를 분석해서 "연도별 비교(Yearly Comparison)"가 가능한 표로 재구성해줘.
